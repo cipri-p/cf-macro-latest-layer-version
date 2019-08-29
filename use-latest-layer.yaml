@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: The AWS CloudFormation template for Latest Layer Version macro
+Resources:
+  LatestLayerVersionLambdaFunctionLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${MacroName}"
+      RetentionInDays: 14
+  LatestLayerVersionLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          "use strict"
+          const AWS = require("aws-sdk")
+          const lambda = new AWS.Lambda({apiVersion: '2015-03-31'});
+
+          exports.lambda_handler = async (event, context) => {
+            let fragment = event['fragment'];
+            try {
+              let keys = Object.keys(fragment.Resources);
+              for(let j=0;j<keys.length;j++) {
+                let resource = fragment.Resources[keys[j]];
+                if (resource.Type == 'AWS::Lambda::Function') {
+                  let layers = resource.Properties.Layers;
+                  if (layers) {
+                    resource.Properties.Layers = await updateLayers(layers);
+                  }
+                }
+              }
+              return {
+                requestId: event["requestId"],
+                status: "success",
+                fragment: fragment
+              };
+            } catch (error) {
+              console.log('An error occured while running a cf template:'+error);
+              return {
+                requestId: event["requestId"],
+                status: "failed",
+                fragment: fragment
+              };
+            }
+          }
+
+          async function updateLayers(layers) {
+            const availableLayers =  await lambda.listLayers().promise();
+            let updatedLayers = [];
+            if (!availableLayers || availableLayers.Layers.length == 0) {
+              return layers;
+            }
+            layers.forEach(layer => {
+              if (layer['Fn::Sub']) {
+                 layer= layer['Fn::Sub'];
+              }
+              if (layer.match('arn:aws:lambda:.+:.+:layer:.+:[0-9]+')) {
+                updatedLayers.push(layer)
+              } else {
+                let layerName = '';
+                let arn = layer.match('(?<name>^[A-Za-z0-9\-\_]+$)');
+                if (arn && arn.groups && arn.groups.name) {
+                  layerName = arn.groups.name;
+                } else {
+                  arn = layer.match('(arn:aws:lambda:(?<region>.+):(?<accountid>.+):layer:(?<name>.+))');
+                  if (arn && arn.groups && arn.groups.name) {
+                    layerName = arn.groups.name;
+                  }
+                }
+                if (layerName  && layerName !='') {
+                  for(let i = 0; i<availableLayers.Layers.length; i++) {
+                    if (availableLayers.Layers[i].LayerName == layerName) {
+                      updatedLayers.push(availableLayers.Layers[i].LatestMatchingVersion.LayerVersionArn);
+                      break;
+                    }
+                  }
+                } else {
+                  throw new Error('Layer ARN/Name could not be parsed.'+layer);
+                }
+
+              }
+            });
+            return updatedLayers;
+          }
+      FunctionName: !Ref MacroName
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Runtime: nodejs8.10
+      Timeout: 30
+      Tags:
+      - Key: Name
+        Value: !Ref MacroName
+    DependsOn:
+    - LatestLayerVersionLambdaFunctionLog
+    - LambdaExecutionRole
+  LatestLayerVersionMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: !Ref MacroName
+      Description: Replaces the Layer name/arn with the arn with including the latest version.
+      FunctionName: !Ref LatestLayerVersionLambdaFunction
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      RoleName: !Sub "${MacroName}-role"
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Policies:
+      - PolicyName: Logs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: "*"
+      - PolicyName: ListLayers
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:ListLayers
+            Resource: "*"
+Parameters:  
+  MacroName:
+    Type: String
+    Default: macro-use-latest-layer    
+    Description: Enter the name of the macro to use in the CF Templates.	
