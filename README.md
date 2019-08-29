@@ -27,8 +27,9 @@ Resources:
       Layers:
         - your-layer 
 
-
+```
 In the Transform section:
 
 ```yaml
 Transform: name-of-macro-latest-layer-version
+```
